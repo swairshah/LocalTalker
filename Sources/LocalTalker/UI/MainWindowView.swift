@@ -35,6 +35,8 @@ struct MainWindowView: View {
         }
     }
 
+    @ObservedObject private var permissionStore = ToolPermissionStore.shared
+
     var body: some View {
         ZStack {
             Palette.bg.ignoresSafeArea()
@@ -385,6 +387,11 @@ private struct ChatTimeline: View {
 private struct ChatRow: View {
     let message: TranscriptStore.Message
     let timeFmt: DateFormatter
+    @ObservedObject var permissionStore = ToolPermissionStore.shared
+    @State private var isExpanded = false
+
+    /// Max characters shown before truncation (click to expand).
+    private static let truncateAt = 200
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -393,8 +400,14 @@ private struct ChatRow: View {
                 .frame(width: 3)
                 .padding(.vertical, 4)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
+                // Header row
                 HStack(spacing: 6) {
+                    if message.role == .toolCall || message.role == .toolResult {
+                        Image(systemName: message.role == .toolCall ? "wrench" : "terminal")
+                            .font(.system(size: 10))
+                            .foregroundStyle(accentColor)
+                    }
                     Text(label)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(accentColor)
@@ -403,11 +416,20 @@ private struct ChatRow: View {
                         .foregroundStyle(Color.white.opacity(0.25))
                 }
 
-                Text(cleaned)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.white.opacity(message.role == .system ? 0.5 : 0.85))
-                    .textSelection(.enabled)
-                    .lineSpacing(2)
+                // Tool call with inline approval buttons
+                if let pending = message.pendingToolCall {
+                    toolCallView(pending)
+                } else if message.role == .toolResult {
+                    expandableCodeBlock
+                } else if message.role == .toolCall {
+                    // Resolved tool call — just a short label
+                    Text(cleaned)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                } else {
+                    // Normal message — expandable if long
+                    expandableText
+                }
             }
             .padding(.leading, 10)
             .padding(.trailing, 16)
@@ -417,11 +439,155 @@ private struct ChatRow: View {
         .contentShape(Rectangle())
     }
 
+    // MARK: - Expandable text (normal messages)
+
+    @ViewBuilder
+    private var expandableText: some View {
+        let text = cleaned
+        let isTruncated = !isExpanded && text.count > Self.truncateAt
+
+        VStack(alignment: .leading, spacing: 2) {
+            Text(isTruncated ? String(text.prefix(Self.truncateAt)) + "…" : text)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white.opacity(message.role == .system ? 0.5 : 0.85))
+                .textSelection(.enabled)
+                .lineSpacing(2)
+
+            if text.count > Self.truncateAt {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                } label: {
+                    Text(isExpanded ? "show less" : "show more")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - Expandable code block (tool results)
+
+    @ViewBuilder
+    private var expandableCodeBlock: some View {
+        let text = cleaned
+        let isTruncated = !isExpanded && text.count > Self.truncateAt
+
+        VStack(alignment: .leading, spacing: 2) {
+            Text(isTruncated ? String(text.prefix(Self.truncateAt)) + "…" : text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.45))
+                .textSelection(.enabled)
+                .lineSpacing(1)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.03))
+                )
+                .onTapGesture {
+                    if text.count > Self.truncateAt {
+                        withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                    }
+                }
+
+            if text.count > Self.truncateAt {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                } label: {
+                    Text(isExpanded ? "collapse" : "expand")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.3))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - Tool call (pending approval)
+
+    @ViewBuilder
+    private func toolCallView(_ call: ToolCall) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: toolIcon(for: call.name))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                Text(call.name)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.7))
+            }
+
+            Text(call.argumentsJSON)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.4))
+                .lineLimit(6)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.03))
+                )
+
+            // Allow / Deny buttons
+            HStack(spacing: 10) {
+                Button {
+                    permissionStore.resolve(allowed: false)
+                } label: {
+                    Text("Deny")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.1))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    permissionStore.resolve(allowed: true)
+                } label: {
+                    Text("Allow")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Palette.accent)
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Toggle(isOn: $permissionStore.rememberChoice) {
+                    Text("Remember")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+    }
+
+    private func toolIcon(for name: String) -> String {
+        switch name {
+        case "run_command": return "terminal"
+        case "read_file": return "doc.text"
+        case "write_file": return "square.and.pencil"
+        case "list_directory": return "folder"
+        default: return "wrench"
+        }
+    }
+
     private var label: String {
         switch message.role {
         case .user: return "You"
         case .assistant: return "Assistant"
         case .system: return "System"
+        case .toolCall: return "Tool"
+        case .toolResult: return "Result"
         }
     }
 
@@ -430,14 +596,18 @@ private struct ChatRow: View {
         case .user: return Palette.accent
         case .assistant: return Palette.speaking
         case .system: return Palette.idle
+        case .toolCall: return Color(white: 0.45)
+        case .toolResult: return Color(white: 0.40)
         }
     }
 
     private var cleaned: String {
-        message.text
-            .replacingOccurrences(of: "<voice>", with: "")
-            .replacingOccurrences(of: "</voice>", with: "")
-            .replacingOccurrences(of: #"<status>[^<]*</status>"#, with: "", options: .regularExpression)
+        LlamaCPPClient.extractFinalResponse(
+            message.text
+                .replacingOccurrences(of: "<voice>", with: "")
+                .replacingOccurrences(of: "</voice>", with: "")
+                .replacingOccurrences(of: #"<status>[^<]*</status>"#, with: "", options: .regularExpression)
+        )
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
@@ -497,3 +667,5 @@ private struct GlassCard<Content: View>: View {
             )
     }
 }
+
+

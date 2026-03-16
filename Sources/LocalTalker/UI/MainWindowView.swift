@@ -73,12 +73,14 @@ struct MainWindowView: View {
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(selectedTab == tab ? Color.white.opacity(0.08) : Color.clear)
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -467,10 +469,14 @@ private struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(perms.sorted(by: { $0.key < $1.key }), id: \.key) { tool, perm in
+                            ForEach(perms.sorted(by: { $0.key < $1.key }), id: \.key) { key, perm in
                                 if perm != .ask {
+                                    let displayKey = key.hasPrefix("run_command::")
+                                        ? "run_command (\(String(key.dropFirst("run_command::".count))))"
+                                        : key
+
                                     HStack(spacing: 8) {
-                                        Text(tool)
+                                        Text(displayKey)
                                             .font(.system(size: 12, design: .monospaced))
                                             .foregroundStyle(.white)
                                         Spacer()
@@ -478,7 +484,7 @@ private struct SettingsView: View {
                                             .font(.caption)
                                             .foregroundStyle(perm == .alwaysAllow ? Color.white.opacity(0.5) : Palette.error.opacity(0.7))
                                         Button {
-                                            permissionStore.resetPermission(for: tool)
+                                            permissionStore.resetPermission(for: key)
                                         } label: {
                                             Image(systemName: "xmark.circle")
                                                 .font(.caption)
@@ -541,7 +547,7 @@ private struct ChatRow: View {
     @State private var isExpanded = false
 
     /// Max characters shown before truncation (click to expand).
-    private static let truncateAt = 200
+    private static let truncateAt = 500
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -589,19 +595,18 @@ private struct ChatRow: View {
         .contentShape(Rectangle())
     }
 
-    // MARK: - Expandable text (normal messages)
+    // MARK: - Expandable text (normal messages) with markdown
 
     @ViewBuilder
     private var expandableText: some View {
         let text = cleaned
         let isTruncated = !isExpanded && text.count > Self.truncateAt
+        let displayText = isTruncated ? String(text.prefix(Self.truncateAt)) + "…" : text
+        let textOpacity = message.role == .system ? 0.5 : 0.85
 
         VStack(alignment: .leading, spacing: 2) {
-            Text(isTruncated ? String(text.prefix(Self.truncateAt)) + "…" : text)
-                .font(.system(size: 13))
-                .foregroundStyle(Color.white.opacity(message.role == .system ? 0.5 : 0.85))
+            MarkdownView(displayText, opacity: textOpacity)
                 .textSelection(.enabled)
-                .lineSpacing(2)
 
             if text.count > Self.truncateAt {
                 Button {
@@ -663,7 +668,7 @@ private struct ChatRow: View {
                 Image(systemName: toolIcon(for: call.name))
                     .font(.system(size: 11))
                     .foregroundStyle(Color.white.opacity(0.4))
-                Text(call.name)
+                Text(permissionScopeLabel(for: call))
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color.white.opacity(0.7))
             }
@@ -719,6 +724,15 @@ private struct ChatRow: View {
                 .toggleStyle(.checkbox)
             }
         }
+    }
+
+    private func permissionScopeLabel(for call: ToolCall) -> String {
+        let key = permissionStore.permissionKey(for: call)
+        if key.hasPrefix("run_command::") {
+            let cmd = String(key.dropFirst("run_command::".count))
+            return "run_command (\(cmd))"
+        }
+        return call.name
     }
 
     private func toolIcon(for name: String) -> String {

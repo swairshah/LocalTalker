@@ -58,6 +58,12 @@ enum ToolPermissionType: String, Codable {
 final class ToolPermissionStore: ObservableObject {
     static let shared = ToolPermissionStore()
 
+    /// Permission map keyed by scope.
+    /// Examples:
+    /// - "read_file"
+    /// - "write_file"
+    /// - "run_command::ls"
+    /// - "run_command::rm"
     @Published var permissions: [String: ToolPermissionType] = [:]
 
     /// The tool call currently awaiting user approval, if any.
@@ -81,6 +87,13 @@ final class ToolPermissionStore: ObservableObject {
             return
         }
         permissions = decoded
+
+        // Safety migration: remove old broad run_command permissions.
+        // We now scope command execution by command name (run_command::ls, run_command::rm, ...).
+        if permissions["run_command"] != nil {
+            permissions.removeValue(forKey: "run_command")
+            save()
+        }
     }
 
     private func save() {
@@ -88,41 +101,81 @@ final class ToolPermissionStore: ObservableObject {
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 
+    // MARK: - Permission Scope
+
+    /// Permission scope key for a tool call.
+    /// - run_command is scoped per command executable (e.g. run_command::ls)
+    /// - other tools remain scoped by tool name.
+    func permissionKey(for toolCall: ToolCall) -> String {
+        guard toolCall.name == "run_command" else { return toolCall.name }
+
+        let raw = (toolCall.arguments["command"] as? String) ?? ""
+        let cmd = Self.extractCommandName(from: raw)
+        return "run_command::\(cmd)"
+    }
+
+    /// Best-effort command extraction for shell input.
+    private nonisolated static func extractCommandName(from command: String) -> String {
+        let tokens = command
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+
+        guard !tokens.isEmpty else { return "unknown" }
+
+        let wrappers: Set<String> = ["sudo", "env", "/usr/bin/env", "command", "builtin", "nohup", "time"]
+
+        for tok in tokens {
+            // Skip env assignments: FOO=bar
+            if tok.contains("=") && !tok.hasPrefix("/") && !tok.hasPrefix("./") {
+                continue
+            }
+            if wrappers.contains(tok) { continue }
+
+            // Normalize basename + lowercase
+            let name = URL(fileURLWithPath: tok).lastPathComponent.lowercased()
+            return name.isEmpty ? "unknown" : name
+        }
+
+        return "unknown"
+    }
+
     // MARK: - Check & Request
 
     /// Returns `true` if the tool call is allowed.
     /// May suspend while showing an approval dialog.
     func requestPermission(for toolCall: ToolCall) async -> Bool {
-        let perm = permissions[toolCall.name] ?? .ask
+        let key = permissionKey(for: toolCall)
+        let perm = permissions[key] ?? .ask
 
         switch perm {
         case .alwaysAllow:
-            print("🔧 [TOOL PERM] \(toolCall.name) → auto-allowed")
+            print("🔧 [TOOL PERM] \(key) → auto-allowed")
             return true
         case .alwaysDeny:
-            print("🔧 [TOOL PERM] \(toolCall.name) → auto-denied")
+            print("🔧 [TOOL PERM] \(key) → auto-denied")
             return false
         case .ask:
             break
         }
 
-        // Show the approval dialog and wait for the user's decision.
+        // Show approval UI and wait for decision.
         return await withCheckedContinuation { continuation in
             self.approvalContinuation = continuation
             self.rememberChoice = false
             self.pendingApproval = toolCall
-            print("🔧 [TOOL PERM] \(toolCall.name) → asking user")
+            print("🔧 [TOOL PERM] \(key) → asking user")
         }
     }
 
     /// Called from the UI when the user taps Allow or Deny.
     func resolve(allowed: Bool) {
         guard let call = pendingApproval else { return }
+        let key = permissionKey(for: call)
 
         if rememberChoice {
-            permissions[call.name] = allowed ? .alwaysAllow : .alwaysDeny
+            permissions[key] = allowed ? .alwaysAllow : .alwaysDeny
             save()
-            print("🔧 [TOOL PERM] Saved preference for \(call.name): \(allowed ? "always_allow" : "always_deny")")
+            print("🔧 [TOOL PERM] Saved preference for \(key): \(allowed ? "always_allow" : "always_deny")")
         }
 
         pendingApproval = nil
@@ -130,9 +183,9 @@ final class ToolPermissionStore: ObservableObject {
         approvalContinuation = nil
     }
 
-    /// Reset a single tool's permission back to "ask".
-    func resetPermission(for toolName: String) {
-        permissions[toolName] = .ask
+    /// Reset a single permission scope back to "ask".
+    func resetPermission(for key: String) {
+        permissions[key] = .ask
         save()
     }
 
@@ -250,7 +303,7 @@ final class ToolManager {
         process.arguments = ["-c", command]
         process.standardOutput = stdout
         process.standardError = stderr
-        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        process.currentDirectoryURL = Constants.appSupportDir // ~/.LocalTalker
 
         do {
             try process.run()

@@ -319,6 +319,7 @@ final class LlamaCPPClient {
 
         let process = Process()
         process.executableURL = binary
+        process.currentDirectoryURL = Constants.appSupportDir // ~/.LocalTalker
         process.arguments = [
             "-m", modelPath,
             "--host", host,

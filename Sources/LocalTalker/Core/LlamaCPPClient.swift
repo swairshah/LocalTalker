@@ -103,6 +103,7 @@ final class LlamaCPPClient {
 
     deinit {
         serverProcess?.terminate()
+        Self.killProcessesOnPort(port, excluding: -1)
     }
 
     func listModels() -> [ModelOption] {
@@ -356,17 +357,47 @@ final class LlamaCPPClient {
     }
 
     private func stopServer() {
+        // Kill our tracked process
         if let proc = serverProcess, proc.isRunning {
-            proc.terminate()
             let pid = proc.processIdentifier
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) {
-                if proc.isRunning {
-                    kill(pid, SIGKILL)
-                }
+            proc.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                if proc.isRunning { kill(pid, SIGKILL) }
             }
         }
         serverProcess = nil
         isRunning = false
+
+        // Also kill any orphaned llama-server processes on our port.
+        // Previous app runs may have leaked processes that weren't terminated.
+        killOrphanedServers()
+    }
+
+    /// Kill any llama-server processes listening on our port that we don't own.
+    private func killOrphanedServers() {
+        let ownPid = serverProcess?.processIdentifier ?? -1
+        Self.killProcessesOnPort(port, excluding: ownPid)
+    }
+
+    /// Static helper to kill processes on a given port (callable from deinit).
+    private nonisolated static func killProcessesOnPort(_ port: Int, excluding ownPid: Int32) {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        proc.arguments = ["-ti", "tcp:\(port)"]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run(); proc.waitUntilExit() } catch { return }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return }
+
+        for line in output.split(separator: "\n") {
+            if let pid = Int32(line.trimmingCharacters(in: .whitespaces)), pid != ownPid, pid > 0 {
+                kill(pid, SIGKILL)
+                print("🧹 [LLM] Killed orphaned llama-server PID \(pid)")
+            }
+        }
     }
 
     /// Extract the user-facing response from raw model output.

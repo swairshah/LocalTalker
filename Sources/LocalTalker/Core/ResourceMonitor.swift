@@ -6,7 +6,7 @@ import Combine
 final class ResourceMonitor: ObservableObject {
 
     struct Stats {
-        var processCPU: Double = 0        // llama-server CPU %
+        var processCPU: Double = 0        // llama-server CPU % (instantaneous)
         var processMemoryMB: Double = 0   // llama-server RSS in MB
         var systemMemoryUsedGB: Double = 0
         var systemMemoryTotalGB: Double = 0
@@ -43,7 +43,7 @@ final class ResourceMonitor: ObservableObject {
         stats.systemMemoryTotalGB = sysMem.total
         stats.systemMemoryUsedGB = sysMem.used
 
-        // Process stats via `ps`
+        // Process stats
         guard let pid = pidProvider?() else {
             stats.processCPU = 0
             stats.processMemoryMB = 0
@@ -74,20 +74,20 @@ final class ResourceMonitor: ObservableObject {
         let active = Double(vmStats.active_count) * pageSize
         let wired = Double(vmStats.wire_count) * pageSize
         let compressed = Double(vmStats.compressor_page_count) * pageSize
-        // "used" = active + wired + compressed (matches Activity Monitor)
         let usedGB = (active + wired + compressed) / (1024 * 1024 * 1024)
 
         return (totalGB, usedGB)
     }
 
-    // MARK: - Process stats (ps)
+    // MARK: - Process stats (top -l 1 for instantaneous CPU)
 
     private static func processStats(pid: Int32) async -> (cpu: Double, memMB: Double) {
-        // Use ps for simplicity — low overhead at 3s intervals
+        // Use `top -l 1 -pid PID -stats cpu,mem` for instantaneous CPU%.
+        // `ps -o %cpu` gives a lifetime average which reads 0 for mostly-idle servers.
         let pipe = Pipe()
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-p", "\(pid)", "-o", "%cpu=,rss="]
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/top")
+        proc.arguments = ["-l", "2", "-pid", "\(pid)", "-stats", "cpu,mem"]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -99,19 +99,41 @@ final class ResourceMonitor: ObservableObject {
         }
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !output.isEmpty else {
+        guard let output = String(data: data, encoding: .utf8) else {
             return (0, 0)
         }
 
-        // ps output: "  12.3 123456"  (cpu%, rss in KB)
-        let parts = output.split(whereSeparator: { $0.isWhitespace })
-        guard parts.count >= 2,
-              let cpu = Double(parts[0]),
-              let rssKB = Double(parts[1]) else {
-            return (0, 0)
+        // top outputs 2 samples (first is always cumulative, second is instantaneous).
+        // Format: header lines then "CPU  MEM" lines.
+        // We want the last data line.
+        let lines = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { line in
+                // Data lines are like "12.3  100M" or "0.0  2560M+"
+                let first = line.split(whereSeparator: { $0.isWhitespace }).first ?? ""
+                return Double(first) != nil
+            }
+
+        guard let last = lines.last else { return (0, 0) }
+
+        let parts = last.split(whereSeparator: { $0.isWhitespace })
+        guard parts.count >= 2 else { return (0, 0) }
+
+        let cpu = Double(parts[0]) ?? 0
+
+        // Memory from top: "2560M", "2560M+", "12G", "500K" etc.
+        let memStr = String(parts[1]).replacingOccurrences(of: "+", with: "").replacingOccurrences(of: "-", with: "")
+        let memMB: Double
+        if memStr.hasSuffix("G") {
+            memMB = (Double(memStr.dropLast()) ?? 0) * 1024
+        } else if memStr.hasSuffix("M") {
+            memMB = Double(memStr.dropLast()) ?? 0
+        } else if memStr.hasSuffix("K") {
+            memMB = (Double(memStr.dropLast()) ?? 0) / 1024
+        } else {
+            memMB = (Double(memStr) ?? 0) / (1024 * 1024) // bytes
         }
 
-        return (cpu, rssKB / 1024.0)
+        return (cpu, memMB)
     }
 }

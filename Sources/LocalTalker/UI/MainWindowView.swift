@@ -23,6 +23,7 @@ struct MainWindowView: View {
 
     enum Tab: String, CaseIterable, Identifiable {
         case talk = "Talk"
+        case prompt = "Prompt"
         case settings = "Settings"
 
         var id: String { rawValue }
@@ -30,6 +31,7 @@ struct MainWindowView: View {
         var icon: String {
             switch self {
             case .talk: return "waveform.circle.fill"
+            case .prompt: return "text.quote"
             case .settings: return "gearshape"
             }
         }
@@ -228,6 +230,8 @@ struct MainWindowView: View {
         switch selectedTab {
         case .talk:
             TalkView(conversationLoop: conversationLoop)
+        case .prompt:
+            PromptEditorView(conversationLoop: conversationLoop)
         case .settings:
             SettingsView(conversationLoop: conversationLoop)
         }
@@ -313,8 +317,104 @@ private struct TalkView: View {
 
 
 
+// MARK: - Prompt Editor
+
+private struct PromptEditorView: View {
+    @ObservedObject var conversationLoop: ConversationLoop
+    @State private var draft: String = ""
+    @State private var showSavedBanner = false
+
+    private var isModified: Bool {
+        draft != conversationLoop.systemPrompt
+    }
+
+    private var isDefault: Bool {
+        conversationLoop.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            == ConversationLoop.defaultSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("System Prompt")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text(conversationLoop.selectedModelName)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                }
+
+                Spacer()
+
+                if showSavedBanner {
+                    Text("Saved")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.listening)
+                        .transition(.opacity)
+                }
+
+                // Restore default
+                Button {
+                    conversationLoop.restoreDefaultPrompt()
+                    draft = conversationLoop.systemPrompt
+                } label: {
+                    Text("Restore Default")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isDefault ? Color.white.opacity(0.2) : Color.white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(isDefault)
+
+                // Save
+                Button {
+                    conversationLoop.systemPrompt = draft
+                    conversationLoop.saveSystemPrompt()
+                    withAnimation { showSavedBanner = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        withAnimation { showSavedBanner = false }
+                    }
+                } label: {
+                    Text("Save")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(isModified ? .black : Color.white.opacity(0.3))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(isModified ? Palette.accent : Color.white.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!isModified)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Divider().overlay(Palette.divider)
+
+            // Editor
+            TextEditor(text: $draft)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(.white)
+                .scrollContentBackground(.hidden)
+                .padding(16)
+                .background(Color.white.opacity(0.02))
+        }
+        .onAppear {
+            draft = conversationLoop.systemPrompt
+        }
+        .onChange(of: conversationLoop.selectedModelPath) {
+            // Reload when model changes
+            draft = conversationLoop.systemPrompt
+        }
+    }
+}
+
 private struct SettingsView: View {
     @ObservedObject var conversationLoop: ConversationLoop
+    @ObservedObject var permissionStore = ToolPermissionStore.shared
     @AppStorage("localtalker.voice") private var selectedVoice = "fantine"
 
     private let voices = ["fantine", "alba", "marius", "javert", "cosette", "eponine", "azelma"]
@@ -342,6 +442,53 @@ private struct SettingsView: View {
                         infoRow("LLM running", conversationLoop.isAgentRunning ? "Yes" : "No")
                         infoRow("Model", conversationLoop.selectedModelName)
                         infoRow("Session ID", conversationLoop.sessionID ?? "—")
+                    }
+                }
+
+                // ── Tool Permissions ────────────────────────────
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Tool Permissions").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Spacer()
+                            Button {
+                                permissionStore.resetAll()
+                            } label: {
+                                Text("Revoke All")
+                                    .font(.caption)
+                                    .foregroundStyle(Palette.error)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        let perms = permissionStore.permissions
+                        if perms.values.allSatisfy({ $0 == .ask }) {
+                            Text("No saved permissions")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(perms.sorted(by: { $0.key < $1.key }), id: \.key) { tool, perm in
+                                if perm != .ask {
+                                    HStack(spacing: 8) {
+                                        Text(tool)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundStyle(.white)
+                                        Spacer()
+                                        Text(perm == .alwaysAllow ? "allowed" : "denied")
+                                            .font(.caption)
+                                            .foregroundStyle(perm == .alwaysAllow ? Color.white.opacity(0.5) : Palette.error.opacity(0.7))
+                                        Button {
+                                            permissionStore.resetPermission(for: tool)
+                                        } label: {
+                                            Image(systemName: "xmark.circle")
+                                                .font(.caption)
+                                                .foregroundStyle(Color.white.opacity(0.3))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -633,7 +780,7 @@ private struct ResourceWidget: View {
             // Memory bar (process)
             resourceRow(
                 icon: "memorychip",
-                label: String(format: "%.0f MB", monitor.stats.processMemoryMB),
+                label: memLabel,
                 fraction: monitor.stats.systemMemoryTotalGB > 0
                     ? monitor.stats.processMemoryMB / (monitor.stats.systemMemoryTotalGB * 1024)
                     : 0,
@@ -678,9 +825,17 @@ private struct ResourceWidget: View {
             Text(label)
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(Color.white.opacity(0.4))
-                .frame(width: 42, alignment: .trailing)
+                .fixedSize()
         }
         .frame(height: 12)
+    }
+
+    private var memLabel: String {
+        let mb = monitor.stats.processMemoryMB
+        if mb >= 1024 {
+            return String(format: "%.1f GB", mb / 1024)
+        }
+        return String(format: "%.0f MB", mb)
     }
 
     private var cpuTint: Color {

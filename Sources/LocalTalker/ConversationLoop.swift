@@ -329,6 +329,18 @@ final class ConversationLoop: ObservableObject {
         case .textEnd:
             break
 
+        case .toolCallsReceived(let calls):
+            for call in calls {
+                transcript.addToolCallMessage(call)
+                transcript.addLog("🔧 Tool call: \(call.name)(\(call.argumentsJSON.prefix(60)))")
+            }
+
+        case .toolResultAppended(let call, let result):
+            transcript.resolveToolCallMessage(callId: call.id, allowed: !result.isError || !result.content.contains("denied"))
+            transcript.addToolResultMessage(call, result: result)
+            let status = result.isError ? "❌" : "✅"
+            transcript.addLog("\(status) \(call.name) → \(result.content.prefix(100))")
+
         case .stateResponse(let streaming, let sessionId):
             sessionID = sessionId
             if !streaming && state == .waiting && !hasSpeechQueuedOrActive {
@@ -584,8 +596,10 @@ final class ConversationLoop: ObservableObject {
     }
 
     private func speechTextForAssistantMessage(_ raw: String) -> String {
-        let voiceOnly = extractVoiceTagText(raw)
-        let outsideVoice = extractOutsideVoiceText(raw)
+        // First extract final response from model-specific tokens (gpt-oss channels etc.)
+        let parsed = LlamaCPPClient.extractFinalResponse(raw)
+        let voiceOnly = extractVoiceTagText(parsed)
+        let outsideVoice = extractOutsideVoiceText(parsed)
 
         if !voiceOnly.isEmpty {
             // If model mixed tagged + untagged text, preserve both in-order-ish

@@ -237,14 +237,19 @@ final class ConversationLoop: ObservableObject {
         voiceParser.reset()
     }
 
+    static let defaultSystemPrompt = """
+    You are LocalTalker, a voice-first local assistant running through llama.cpp.
+    The user is speaking with you in real time, so default to short, clear, conversational responses.
+    Put every spoken sentence inside <voice> tags.
+    Never use any XML/HTML/SSML tags other than <voice>.
+    Keep replies concise and practical.
+    """
+
+    /// The active system prompt. Persisted per-model in ~/.LocalTalker/prompts/
+    @Published var systemPrompt: String = ConversationLoop.defaultSystemPrompt
+
     private func startConversationAgent() async throws {
-        let systemPrompt = """
-        You are LocalTalker, a voice-first local assistant running through llama.cpp.
-        The user is speaking with you in real time, so default to short, clear, conversational responses.
-        Put every spoken sentence inside <voice> tags.
-        Never use any XML/HTML/SSML tags other than <voice>.
-        Keep replies concise and practical.
-        """
+        loadPromptForCurrentModel()
 
         refreshModels()
         guard !availableModels.isEmpty else {
@@ -658,5 +663,49 @@ final class ConversationLoop: ObservableObject {
         text
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - System Prompt Persistence
+
+    private static let promptsDir: URL = {
+        let dir = Constants.appSupportDir.appendingPathComponent("prompts")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    /// Slug for the current model name (safe for filenames).
+    private var promptFileURL: URL? {
+        let name = selectedModelName
+        guard !name.isEmpty, name != "No model" else { return nil }
+        let slug = name
+            .replacingOccurrences(of: #"[^a-zA-Z0-9._-]"#, with: "_", options: .regularExpression)
+        return Self.promptsDir.appendingPathComponent("\(slug).txt")
+    }
+
+    private func loadPromptForCurrentModel() {
+        guard let url = promptFileURL,
+              FileManager.default.fileExists(atPath: url.path),
+              let saved = try? String(contentsOf: url, encoding: .utf8),
+              !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            systemPrompt = Self.defaultSystemPrompt
+            return
+        }
+        systemPrompt = saved
+    }
+
+    func saveSystemPrompt() {
+        guard let url = promptFileURL else { return }
+        try? systemPrompt.write(to: url, atomically: true, encoding: .utf8)
+        // Also update the live prompt on the LLM client
+        llmClient.updateSystemPrompt(systemPrompt)
+    }
+
+    func restoreDefaultPrompt() {
+        systemPrompt = Self.defaultSystemPrompt
+        if let url = promptFileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        llmClient.updateSystemPrompt(systemPrompt)
     }
 }

@@ -90,6 +90,8 @@ final class LlamaCPPClient {
     private var streamGeneration: Int = 0
 
     private var serverProcess: Process?
+    /// PID of the running llama-server, or nil if not running.
+    var serverPID: Int32? { serverProcess?.isRunning == true ? serverProcess?.processIdentifier : nil }
     private let host = "127.0.0.1"
     private let port = 18089
 

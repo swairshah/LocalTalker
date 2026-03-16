@@ -41,6 +41,7 @@ final class ConversationLoop: ObservableObject {
 
     let transcript = TranscriptStore()
     let llmClient = LlamaCPPClient()
+    let resourceMonitor = ResourceMonitor()
 
     private let audioCapture = AudioCaptureSession()
     private let audioBuffer = AudioBuffer()
@@ -263,6 +264,9 @@ final class ConversationLoop: ObservableObject {
 
         sessionID = llmClient.sessionId
         isAgentRunning = true
+
+        // Start resource monitoring with llama-server PID
+        resourceMonitor.start { [weak self] in self?.llmClient.serverPID }
     }
 
     private func setupCallbacks() {

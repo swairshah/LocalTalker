@@ -766,37 +766,77 @@ private struct ChatRow: View {
 
 private struct ResourceWidget: View {
     @ObservedObject var monitor: ResourceMonitor
+    @State private var showDetail = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            // CPU bar
-            resourceRow(
-                icon: "cpu",
-                label: String(format: "%.0f%%", monitor.stats.processCPU),
-                fraction: min(monitor.stats.processCPU / 100.0, 1.0),
-                tint: cpuTint
-            )
+        VStack(alignment: .leading, spacing: 0) {
+            // Header — click to toggle detail
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showDetail.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "gauge.with.dots.needle.33percent")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                    Text(compactSummary)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.45))
+                    Spacer(minLength: 0)
+                    Image(systemName: showDetail ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.2))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+            }
+            .buttonStyle(.plain)
 
-            // Memory bar (process)
-            resourceRow(
-                icon: "memorychip",
-                label: memLabel,
-                fraction: monitor.stats.systemMemoryTotalGB > 0
-                    ? monitor.stats.processMemoryMB / (monitor.stats.systemMemoryTotalGB * 1024)
-                    : 0,
-                tint: Color.white.opacity(0.35)
-            )
+            if showDetail {
+                Divider().overlay(Color.white.opacity(0.06))
 
-            // System memory text
-            HStack(spacing: 4) {
-                Text(String(format: "sys %.1f / %.0f GB",
-                            monitor.stats.systemMemoryUsedGB,
-                            monitor.stats.systemMemoryTotalGB))
-                    .font(.system(size: 9))
-                    .foregroundStyle(Color.white.opacity(0.25))
+                VStack(alignment: .leading, spacing: 6) {
+                    // Per-component rows
+                    ForEach(monitor.processes) { proc in
+                        if proc.active {
+                            componentRow(proc)
+                        }
+                    }
+
+                    // Inactive components
+                    let inactive = monitor.processes.filter { !$0.active }
+                    if !inactive.isEmpty {
+                        HStack(spacing: 4) {
+                            ForEach(inactive) { proc in
+                                Text(proc.label)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.white.opacity(0.2))
+                            }
+                            Text("idle")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.white.opacity(0.15))
+                        }
+                    }
+
+                    Divider().overlay(Color.white.opacity(0.04))
+
+                    // System totals
+                    HStack(spacing: 4) {
+                        Text(String(format: "sys %.1f / %.0f GB",
+                                    monitor.system.usedGB,
+                                    monitor.system.totalGB))
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.white.opacity(0.25))
+                        Spacer()
+                        Text(String(format: "total %@", formatMem(monitor.totalProcessMemMB)))
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.white.opacity(0.25))
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(10)
         .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -804,45 +844,65 @@ private struct ResourceWidget: View {
         )
     }
 
-    private func resourceRow(icon: String, label: String, fraction: Double, tint: Color) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 9))
-                .foregroundStyle(Color.white.opacity(0.35))
-                .frame(width: 12)
+    // MARK: - Compact summary (shown in collapsed state)
 
+    private var compactSummary: String {
+        let mem = formatMem(monitor.totalProcessMemMB)
+        let cpu = String(format: "%.0f%%", monitor.totalProcessCPU)
+        return "\(cpu)  \(mem)"
+    }
+
+    // MARK: - Per-component row
+
+    private func componentRow(_ proc: ResourceMonitor.ProcessStats) -> some View {
+        HStack(spacing: 6) {
+            Text(proc.label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.45))
+                .frame(width: 24, alignment: .leading)
+
+            // Memory bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color.white.opacity(0.06))
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(tint)
-                        .frame(width: max(0, geo.size.width * min(fraction, 1.0)))
+                        .fill(barTint(cpu: proc.cpu))
+                        .frame(width: max(0, geo.size.width * memFraction(proc.memMB)))
                 }
             }
             .frame(height: 4)
 
-            Text(label)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.4))
+            Text(formatMem(proc.memMB))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.35))
                 .fixedSize()
+
+            Text(String(format: "%.0f%%", proc.cpu))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.35))
+                .frame(width: 26, alignment: .trailing)
         }
         .frame(height: 12)
     }
 
-    private var memLabel: String {
-        let mb = monitor.stats.processMemoryMB
-        if mb >= 1024 {
-            return String(format: "%.1f GB", mb / 1024)
-        }
-        return String(format: "%.0f MB", mb)
+    // MARK: - Helpers
+
+    private func formatMem(_ mb: Double) -> String {
+        if mb >= 1024 { return String(format: "%.1fG", mb / 1024) }
+        if mb >= 1 { return String(format: "%.0fM", mb) }
+        return "0M"
     }
 
-    private var cpuTint: Color {
-        let cpu = monitor.stats.processCPU
-        if cpu > 80 { return Color(red: 0.85, green: 0.45, blue: 0.40) }  // red-ish
-        if cpu > 40 { return Color(red: 0.82, green: 0.68, blue: 0.42) }  // warm
-        return Color.white.opacity(0.35)                                     // muted
+    private func memFraction(_ mb: Double) -> Double {
+        guard monitor.system.totalGB > 0 else { return 0 }
+        return min(mb / (monitor.system.totalGB * 1024), 1.0)
+    }
+
+    private func barTint(cpu: Double) -> Color {
+        if cpu > 80 { return Color(red: 0.85, green: 0.45, blue: 0.40) }
+        if cpu > 40 { return Color(red: 0.82, green: 0.68, blue: 0.42) }
+        return Color.white.opacity(0.35)
     }
 }
 

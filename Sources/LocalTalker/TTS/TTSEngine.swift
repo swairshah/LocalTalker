@@ -18,6 +18,8 @@ final class TTSEngine {
 
     private var serverProcess: Process?
     var isServerRunning = false
+    /// PID of the running pocket-tts-cli server, or nil.
+    var serverPID: Int32? { serverProcess?.isRunning == true ? serverProcess?.processIdentifier : nil }
 
     let host = Constants.ttsHost
     let port = Constants.ttsPort
@@ -97,9 +99,29 @@ final class TTSEngine {
             process.terminate()
             let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-                if process.isRunning {
-                    kill(pid, SIGKILL)
-                }
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+
+        // Kill any orphaned TTS servers on our port
+        killOrphanedTTS()
+    }
+
+    private func killOrphanedTTS() {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        proc.arguments = ["-ti", "tcp:\(port)"]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run(); proc.waitUntilExit() } catch { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return }
+        let ownPid = serverProcess?.processIdentifier ?? -1
+        for line in output.split(separator: "\n") {
+            if let pid = Int32(line.trimmingCharacters(in: .whitespaces)), pid != ownPid, pid > 0 {
+                kill(pid, SIGKILL)
+                print("🧹 [TTS] Killed orphaned pocket-tts PID \(pid)")
             }
         }
     }

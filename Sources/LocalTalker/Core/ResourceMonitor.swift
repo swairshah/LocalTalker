@@ -1,28 +1,53 @@
 import Foundation
 import Combine
 
-/// Polls CPU and memory usage for a target process (llama-server) and the system overall.
+/// Polls CPU and memory usage for all LocalTalker sub-processes and the system.
 @MainActor
 final class ResourceMonitor: ObservableObject {
 
-    struct Stats {
-        var processCPU: Double = 0        // llama-server CPU % (instantaneous)
-        var processMemoryMB: Double = 0   // llama-server RSS in MB
-        var systemMemoryUsedGB: Double = 0
-        var systemMemoryTotalGB: Double = 0
+    struct ProcessStats: Identifiable {
+        let id: String       // component name
+        let label: String    // display label
+        var cpu: Double = 0
+        var memMB: Double = 0
+        var active: Bool = false
     }
 
-    @Published private(set) var stats = Stats()
+    struct SystemStats {
+        var usedGB: Double = 0
+        var totalGB: Double = 0
+    }
+
+    /// Per-component stats (LLM, TTS, STT, App).
+    @Published private(set) var processes: [ProcessStats] = [
+        ProcessStats(id: "llm", label: "LLM"),
+        ProcessStats(id: "tts", label: "TTS"),
+        ProcessStats(id: "stt", label: "STT"),
+        ProcessStats(id: "app", label: "App"),
+    ]
+
+    @Published private(set) var system = SystemStats()
     @Published private(set) var isMonitoring = false
 
-    private var timer: Timer?
-    private var pidProvider: (() -> Int32?)?
+    /// Sum of all tracked process memory.
+    var totalProcessMemMB: Double { processes.reduce(0) { $0 + $1.memMB } }
+    /// Sum of all tracked process CPU.
+    var totalProcessCPU: Double { processes.reduce(0) { $0 + $1.cpu } }
 
-    /// Start monitoring. `pidProvider` returns the current llama-server PID (or nil).
-    func start(pidProvider: @escaping () -> Int32?) {
-        self.pidProvider = pidProvider
+    private var timer: Timer?
+    private var pidProviders: [String: () -> Int32?] = [:]
+
+    /// Start monitoring. Pass PID providers for each component.
+    func start(
+        llmPID: @escaping () -> Int32?,
+        ttsPID: @escaping () -> Int32?
+    ) {
+        pidProviders = [
+            "llm": llmPID,
+            "tts": ttsPID,
+            "app": { ProcessInfo.processInfo.processIdentifier },
+        ]
         isMonitoring = true
-        // Immediate first sample
         Task { await sample() }
         timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -38,20 +63,53 @@ final class ResourceMonitor: ObservableObject {
     }
 
     private func sample() async {
-        // System memory via host_statistics64
+        // System memory
         let sysMem = Self.systemMemory()
-        stats.systemMemoryTotalGB = sysMem.total
-        stats.systemMemoryUsedGB = sysMem.used
+        system = SystemStats(usedGB: sysMem.used, totalGB: sysMem.total)
 
-        // Process stats
-        guard let pid = pidProvider?() else {
-            stats.processCPU = 0
-            stats.processMemoryMB = 0
-            return
+        // Collect PIDs to query (batch into one top call for efficiency)
+        var pidMap: [(index: Int, pid: Int32)] = []
+        for (i, proc) in processes.enumerated() {
+            if let provider = pidProviders[proc.id], let pid = provider() {
+                pidMap.append((i, pid))
+            } else {
+                processes[i].cpu = 0
+                processes[i].memMB = 0
+                processes[i].active = false
+            }
         }
-        let procStats = await Self.processStats(pid: pid)
-        stats.processCPU = procStats.cpu
-        stats.processMemoryMB = procStats.memMB
+
+        // Also look for any running qwen_asr process (transient STT)
+        if let sttPid = Self.findProcessPID(named: "qwen_asr") {
+            if let sttIdx = processes.firstIndex(where: { $0.id == "stt" }) {
+                pidMap.append((sttIdx, sttPid))
+            }
+        } else {
+            if let sttIdx = processes.firstIndex(where: { $0.id == "stt" }) {
+                processes[sttIdx].cpu = 0
+                processes[sttIdx].memMB = 0
+                processes[sttIdx].active = false
+            }
+        }
+
+        guard !pidMap.isEmpty else { return }
+
+        // Query all PIDs in one ps call
+        let pids = pidMap.map { "\($0.pid)" }
+        let results = await Self.batchProcessStats(pids: pids)
+
+        for (index, pid) in pidMap {
+            let key = "\(pid)"
+            if let stats = results[key] {
+                processes[index].cpu = stats.cpu
+                processes[index].memMB = stats.memMB
+                processes[index].active = true
+            } else {
+                processes[index].cpu = 0
+                processes[index].memMB = 0
+                processes[index].active = false
+            }
+        }
     }
 
     // MARK: - System memory (Mach API)
@@ -79,15 +137,13 @@ final class ResourceMonitor: ObservableObject {
         return (totalGB, usedGB)
     }
 
-    // MARK: - Process stats (top -l 1 for instantaneous CPU)
+    // MARK: - Batch process stats (single ps call)
 
-    private static func processStats(pid: Int32) async -> (cpu: Double, memMB: Double) {
-        // Use `top -l 1 -pid PID -stats cpu,mem` for instantaneous CPU%.
-        // `ps -o %cpu` gives a lifetime average which reads 0 for mostly-idle servers.
+    private static func batchProcessStats(pids: [String]) async -> [String: (cpu: Double, memMB: Double)] {
         let pipe = Pipe()
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/top")
-        proc.arguments = ["-l", "2", "-pid", "\(pid)", "-stats", "cpu,mem"]
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-p", pids.joined(separator: ","), "-o", "pid=,%cpu=,rss="]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -95,45 +151,37 @@ final class ResourceMonitor: ObservableObject {
             try proc.run()
             proc.waitUntilExit()
         } catch {
-            return (0, 0)
+            return [:]
         }
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
-            return (0, 0)
+        guard let output = String(data: data, encoding: .utf8) else { return [:] }
+
+        var results: [String: (cpu: Double, memMB: Double)] = [:]
+        for line in output.split(separator: "\n") {
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 3,
+                  let cpu = Double(parts[1]),
+                  let rssKB = Double(parts[2]) else { continue }
+            let pid = String(parts[0])
+            results[pid] = (cpu: cpu, memMB: rssKB / 1024.0)
         }
+        return results
+    }
 
-        // top outputs 2 samples (first is always cumulative, second is instantaneous).
-        // Format: header lines then "CPU  MEM" lines.
-        // We want the last data line.
-        let lines = output.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { line in
-                // Data lines are like "12.3  100M" or "0.0  2560M+"
-                let first = line.split(whereSeparator: { $0.isWhitespace }).first ?? ""
-                return Double(first) != nil
-            }
+    // MARK: - Find transient process by name
 
-        guard let last = lines.last else { return (0, 0) }
-
-        let parts = last.split(whereSeparator: { $0.isWhitespace })
-        guard parts.count >= 2 else { return (0, 0) }
-
-        let cpu = Double(parts[0]) ?? 0
-
-        // Memory from top: "2560M", "2560M+", "12G", "500K" etc.
-        let memStr = String(parts[1]).replacingOccurrences(of: "+", with: "").replacingOccurrences(of: "-", with: "")
-        let memMB: Double
-        if memStr.hasSuffix("G") {
-            memMB = (Double(memStr.dropLast()) ?? 0) * 1024
-        } else if memStr.hasSuffix("M") {
-            memMB = Double(memStr.dropLast()) ?? 0
-        } else if memStr.hasSuffix("K") {
-            memMB = (Double(memStr.dropLast()) ?? 0) / 1024
-        } else {
-            memMB = (Double(memStr) ?? 0) / (1024 * 1024) // bytes
-        }
-
-        return (cpu, memMB)
+    private static func findProcessPID(named name: String) -> Int32? {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        proc.arguments = ["-x", name]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do { try proc.run(); proc.waitUntilExit() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int32(output.split(separator: "\n").first ?? "") else { return nil }
+        return pid
     }
 }

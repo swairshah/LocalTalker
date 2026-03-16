@@ -270,8 +270,11 @@ final class ConversationLoop: ObservableObject {
         sessionID = llmClient.sessionId
         isAgentRunning = true
 
-        // Start resource monitoring with llama-server PID
-        resourceMonitor.start { [weak self] in self?.llmClient.serverPID }
+        // Start resource monitoring for all sub-processes
+        resourceMonitor.start(
+            llmPID: { [weak self] in self?.llmClient.serverPID },
+            ttsPID: { [weak self] in self?.ttsEngine.serverPID }
+        )
     }
 
     private func setupCallbacks() {

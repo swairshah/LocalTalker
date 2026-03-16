@@ -14,6 +14,8 @@ final class LlamaCPPClient {
         case agentEnd
         case textDelta(String)
         case textEnd(String)
+        case toolCallsReceived([ToolCall])
+        case toolResultAppended(ToolCall, ToolResult)
         case stateResponse(isStreaming: Bool, sessionId: String?)
         case response(command: String, success: Bool, error: String?)
         case error(String)
@@ -53,10 +55,34 @@ final class LlamaCPPClient {
     private(set) var currentModel: ModelOption?
     private(set) var sessionId: String? = UUID().uuidString
 
-    private struct ChatMessage: Codable {
+    /// A message in the chat history. Supports text, assistant tool calls, and tool results.
+    private struct ChatMessage {
         let role: String
         let content: String
+        let toolCalls: [[String: Any]]?   // For assistant messages with tool_calls
+        let toolCallId: String?           // For "tool" role messages (results)
+
+        init(role: String, content: String, toolCalls: [[String: Any]]? = nil, toolCallId: String? = nil) {
+            self.role = role
+            self.content = content
+            self.toolCalls = toolCalls
+            self.toolCallId = toolCallId
+        }
+
+        /// Serialize to the OpenAI messages format.
+        func toAPIDict() -> [String: Any] {
+            var dict: [String: Any] = ["role": role, "content": content]
+            if let tc = toolCalls, !tc.isEmpty {
+                dict["tool_calls"] = tc
+            }
+            if let id = toolCallId {
+                dict["tool_call_id"] = id
+            }
+            return dict
+        }
     }
+
+    var toolsEnabled = true
 
     private var systemPrompt: String = ""
     private var history: [ChatMessage] = []
@@ -129,15 +155,12 @@ final class LlamaCPPClient {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Invalidate and cancel any in-flight generation so stale events
-        // from the previous turn can't bleed into the new one.
         abort()
         let generation = streamGeneration
 
         isStreaming = true
         history.append(ChatMessage(role: "user", content: trimmed))
 
-        // Debug: print the full history being sent
         print("📤 [LLM gen=\(generation)] sendPrompt — history has \(history.count) msgs:")
         for (i, msg) in history.enumerated() {
             print("   [\(i)] \(msg.role): \(msg.content.prefix(100))")
@@ -150,10 +173,7 @@ final class LlamaCPPClient {
 
             defer {
                 Task { @MainActor [weak self] in
-                    guard let self, self.streamGeneration == generation else {
-                        print("📥 [LLM gen=\(generation)] agentEnd BLOCKED — current gen=\(self?.streamGeneration ?? -1)")
-                        return
-                    }
+                    guard let self, self.streamGeneration == generation else { return }
                     self.isStreaming = false
                     self.generationTask = nil
                     self.onEvent?(.agentEnd)
@@ -161,36 +181,76 @@ final class LlamaCPPClient {
             }
 
             do {
-                let reply = try await self.generateReply()
-                guard !Task.isCancelled else {
-                    print("📥 [LLM gen=\(generation)] reply CANCELLED")
-                    return
-                }
+                // Tool-calling loop: model may request tools multiple times
+                // before producing a final text response.
+                var maxRounds = 8
+                while maxRounds > 0 {
+                    maxRounds -= 1
+                    guard !Task.isCancelled else { return }
 
-                print("📥 [LLM gen=\(generation)] RAW REPLY: \(reply.prefix(300))")
+                    let response = try await self.callCompletion(generation: generation)
+                    guard !Task.isCancelled, self.streamGeneration == generation else { return }
 
-                await MainActor.run {
-                    guard self.streamGeneration == generation else {
-                        print("📥 [LLM gen=\(generation)] textDelta BLOCKED — current gen=\(self.streamGeneration)")
-                        return
+                    if let toolCalls = response.toolCalls, !toolCalls.isEmpty {
+                        // ── Model wants to call tools ──────────────────────
+                        // Store the assistant message (with tool_calls) in history
+                        await MainActor.run {
+                            guard self.streamGeneration == generation else { return }
+                            self.history.append(ChatMessage(
+                                role: "assistant",
+                                content: response.text ?? "",
+                                toolCalls: response.rawToolCalls
+                            ))
+                            self.onEvent?(.toolCallsReceived(toolCalls))
+                        }
+
+                        // Execute each tool (with permission checks)
+                        for call in toolCalls {
+                            guard !Task.isCancelled, self.streamGeneration == generation else { return }
+
+                            let allowed = await ToolPermissionStore.shared.requestPermission(for: call)
+                            let result: ToolResult
+                            if allowed {
+                                result = await ToolManager.shared.execute(call)
+                            } else {
+                                result = ToolResult(callId: call.id, content: "Tool call denied by user.", isError: true)
+                            }
+
+                            await MainActor.run {
+                                guard self.streamGeneration == generation else { return }
+                                self.history.append(ChatMessage(
+                                    role: "tool",
+                                    content: result.content,
+                                    toolCallId: call.id
+                                ))
+                                self.onEvent?(.toolResultAppended(call, result))
+                            }
+                        }
+                        // Loop back — the model will see the tool results and continue.
+                        continue
                     }
-                    // Fire events with raw reply (may include <voice> tags)
-                    for chunk in self.chunkReply(reply) {
-                        self.onEvent?(.textDelta(chunk))
+
+                    // ── Final text response (no tool calls) ────────────
+                    let rawReply = response.text ?? ""
+                    print("📥 [LLM gen=\(generation)] RAW REPLY: \(rawReply.prefix(300))")
+
+                    // Parse out model-specific tokens (gpt-oss channels, special tokens)
+                    let reply = Self.extractFinalResponse(rawReply)
+                    print("📥 [LLM gen=\(generation)] CLEANED REPLY: \(reply.prefix(300))")
+
+                    await MainActor.run {
+                        guard self.streamGeneration == generation else { return }
+                        for chunk in self.chunkReply(reply) {
+                            self.onEvent?(.textDelta(chunk))
+                        }
+                        self.onEvent?(.textEnd(reply))
+                        let cleaned = Self.stripTagsForHistory(reply)
+                        self.history.append(ChatMessage(role: "assistant", content: cleaned))
                     }
-                    self.onEvent?(.textEnd(reply))
-                    // Store CLEANED text in history so the model never sees
-                    // its own <voice> tags — small models echo them back,
-                    // causing fragments from previous turns to repeat.
-                    let cleaned = Self.stripTagsForHistory(reply)
-                    print("📥 [LLM gen=\(generation)] Storing in history: \(cleaned.prefix(200))")
-                    self.history.append(ChatMessage(role: "assistant", content: cleaned))
+                    break  // Done
                 }
             } catch {
-                guard !Task.isCancelled else {
-                    print("📥 [LLM gen=\(generation)] error CANCELLED")
-                    return
-                }
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard self.streamGeneration == generation else { return }
                     self.onEvent?(.error(error.localizedDescription))
@@ -301,20 +361,66 @@ final class LlamaCPPClient {
         isRunning = false
     }
 
+    /// Extract the user-facing response from raw model output.
+    ///
+    /// Handles multiple model output formats:
+    /// - **gpt-oss**: Uses `<|channel|>analysis<|message|>...<|channel|>final<|constrain|>...`
+    ///   We extract only the "final" channel content.
+    /// - **Voice tags**: `<voice>...</voice>` are kept for TTS extraction but stripped from history.
+    /// - **Generic special tokens**: `<|...|>` tokens are stripped.
+    static func extractFinalResponse(_ raw: String) -> String {
+        var text = raw
+
+        // ── gpt-oss channel format ──────────────────────────────────
+
+        // The model outputs multiple channels; we only want "final".
+        // Pattern: <|channel|>final<|constrain|>CONTENT or <|channel|>final<|message|>CONTENT
+        if text.contains("<|channel|>") {
+            // Try to extract the "final" channel content
+            if let finalRange = text.range(of: "<|channel|>final") {
+                text = String(text[finalRange.upperBound...])
+                // Strip the delimiter after "final" (e.g. <|constrain|>, <|message|>)
+                if let delimEnd = text.range(of: "|>") {
+                    text = String(text[delimEnd.upperBound...])
+                }
+            }
+            // Remove any trailing <|end|>, <|start|>, etc.
+            text = text.replacingOccurrences(of: #"<\|[^|]*\|>"#, with: "", options: .regularExpression)
+        }
+
+        // ── Generic special token cleanup ───────────────────────────
+        // Strip any remaining <|...|> tokens from other models
+        text = text.replacingOccurrences(of: #"<\|[^|]*\|>"#, with: "", options: .regularExpression)
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Strip voice/status tags so they never appear in the LLM chat history.
     /// The model sees clean text only; it produces <voice> tags from the
     /// system prompt instruction, not from echoing its own prior output.
     private static func stripTagsForHistory(_ text: String) -> String {
-        text
+        var cleaned = extractFinalResponse(text)
+        cleaned = cleaned
             .replacingOccurrences(of: #"<voice>([\s\S]*?)</voice>"#, with: "$1", options: .regularExpression)
             .replacingOccurrences(of: "<voice>", with: "")
             .replacingOccurrences(of: "</voice>", with: "")
             .replacingOccurrences(of: #"<status>[^<]*</status>"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func generateReply() async throws -> String {
+    // MARK: - Completion Response
+
+    struct CompletionResponse {
+        let text: String?
+        let toolCalls: [ToolCall]?
+        /// Raw tool_calls dicts to store in history (for the API round-trip).
+        let rawToolCalls: [[String: Any]]?
+    }
+
+    /// Call the OpenAI-compatible completions endpoint.
+    /// Returns text and/or tool calls from the model.
+    private func callCompletion(generation: Int) async throws -> CompletionResponse {
         let url = URL(string: "http://\(host):\(port)/v1/chat/completions")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -323,29 +429,49 @@ final class LlamaCPPClient {
 
         let modelName = currentModel?.name ?? "local-model"
 
-        // Build messages with clean assistant history (no tags).
-        var messages: [ChatMessage] = [ChatMessage(role: "system", content: systemPrompt)]
+        // Build messages array
+        var messages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
         for msg in history {
-            if msg.role == "assistant" {
-                // Double-clean in case older history entries still have tags
-                messages.append(ChatMessage(role: "assistant", content: Self.stripTagsForHistory(msg.content)))
+            if msg.role == "assistant" && msg.toolCalls == nil {
+                // Clean tags from plain-text assistant messages
+                var dict: [String: Any] = [
+                    "role": "assistant",
+                    "content": Self.stripTagsForHistory(msg.content)
+                ]
+                if let tc = msg.toolCalls { dict["tool_calls"] = tc }
+                messages.append(dict)
             } else {
-                messages.append(msg)
+                messages.append(msg.toAPIDict())
             }
         }
 
-        // Debug: show what we're actually sending to llama-server
         print("🌐 [API] Sending \(messages.count) messages to llama-server:")
         for (i, msg) in messages.enumerated() {
-            print("   [\(i)] \(msg.role): \(msg.content.prefix(120))")
+            let role = msg["role"] as? String ?? "?"
+            let content = (msg["content"] as? String ?? "").prefix(120)
+            let hasTc = msg["tool_calls"] != nil ? " +tool_calls" : ""
+            let tcId = msg["tool_call_id"] as? String
+            let tcIdStr = tcId != nil ? " (call_id=\(tcId!))" : ""
+            print("   [\(i)] \(role)\(hasTc)\(tcIdStr): \(content)")
         }
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": modelName,
-            "messages": messages.map { ["role": $0.role, "content": $0.content] },
+            "messages": messages,
             "stream": false,
             "temperature": 0.7,
         ]
+
+        // Include tool definitions if enabled
+        if toolsEnabled {
+            let tools = ToolManager.shared.toolsPayload
+            if !tools.isEmpty {
+                payload["tools"] = tools
+            }
+        }
+
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -363,13 +489,35 @@ final class LlamaCPPClient {
             let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let choices = root["choices"] as? [[String: Any]],
             let first = choices.first,
-            let message = first["message"] as? [String: Any],
-            let content = message["content"] as? String
+            let message = first["message"] as? [String: Any]
         else {
             throw ClientError.badResponse
         }
 
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = (message["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Parse tool_calls if present
+        var toolCalls: [ToolCall]? = nil
+        var rawToolCalls: [[String: Any]]? = nil
+
+        if let apiToolCalls = message["tool_calls"] as? [[String: Any]], !apiToolCalls.isEmpty {
+            rawToolCalls = apiToolCalls
+            toolCalls = apiToolCalls.compactMap { tc -> ToolCall? in
+                guard let id = tc["id"] as? String,
+                      let function = tc["function"] as? [String: Any],
+                      let name = function["name"] as? String else { return nil }
+
+                let argsStr = function["arguments"] as? String ?? "{}"
+                let args = (try? JSONSerialization.jsonObject(with: Data(argsStr.utf8))) as? [String: Any] ?? [:]
+
+                return ToolCall(id: id, name: name, arguments: args)
+            }
+            if toolCalls?.isEmpty == true { toolCalls = nil }
+
+            print("🔧 [LLM] Tool calls: \(toolCalls?.map { "\($0.name)(\($0.argumentsJSON.prefix(80)))" } ?? [])")
+        }
+
+        return CompletionResponse(text: content, toolCalls: toolCalls, rawToolCalls: rawToolCalls)
     }
 
     private func checkHealth() async -> Bool {

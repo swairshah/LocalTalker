@@ -9,11 +9,15 @@ final class TranscriptStore: ObservableObject {
         let role: Role
         var text: String
         let isComplete: Bool
+        /// For `.toolCall` role messages — the pending tool call.
+        var pendingToolCall: ToolCall?
 
         enum Role {
             case user
             case assistant
             case system
+            case toolCall
+            case toolResult
         }
     }
 
@@ -56,6 +60,28 @@ final class TranscriptStore: ObservableObject {
 
     func addSystemMessage(_ text: String) {
         messages.append(Message(role: .system, text: text, isComplete: true))
+        trimIfNeeded()
+    }
+
+    func addToolCallMessage(_ call: ToolCall) {
+        messages.append(Message(role: .toolCall, text: call.name, isComplete: false, pendingToolCall: call))
+    }
+
+    func resolveToolCallMessage(callId: String, allowed: Bool) {
+        if let idx = messages.lastIndex(where: { $0.pendingToolCall?.id == callId }) {
+            let status = allowed ? "allowed" : "denied"
+            messages[idx] = Message(
+                role: .toolCall,
+                text: "\(messages[idx].text) — \(status)",
+                isComplete: true,
+                pendingToolCall: nil
+            )
+        }
+    }
+
+    func addToolResultMessage(_ call: ToolCall, result: ToolResult) {
+        // Store the full content — the UI will handle truncation + expand
+        messages.append(Message(role: .toolResult, text: result.content, isComplete: true))
         trimIfNeeded()
     }
 

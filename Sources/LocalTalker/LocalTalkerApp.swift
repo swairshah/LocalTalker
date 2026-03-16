@@ -27,20 +27,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.disableAutomaticTermination("LocalTalker voice session active")
 
         // Set app icon from bundled .icns
-        if let iconPath = Bundle.main.path(forResource: "LocalTalker", ofType: "icns") ?? Bundle.main.path(forResource: "Commander", ofType: "icns") {
+        if let iconPath = Bundle.main.path(forResource: "LocalTalker", ofType: "icns") {
             NSApp.applicationIconImage = NSImage(contentsOfFile: iconPath)
         } else {
-            // Fallback: load from next to executable or Resources/
             let execDir = Bundle.main.executableURL?.deletingLastPathComponent()
             let candidates = [
                 execDir?.appendingPathComponent("LocalTalker.icns"),
-                execDir?.appendingPathComponent("Commander.icns"),
                 execDir?.appendingPathComponent("../Resources/LocalTalker.icns"),
-                execDir?.appendingPathComponent("../Resources/Commander.icns"),
                 execDir?.appendingPathComponent("../../Resources/LocalTalker.icns"),
-                execDir?.appendingPathComponent("../../Resources/Commander.icns"),
                 URL(fileURLWithPath: "Resources/LocalTalker.icns"),
-                URL(fileURLWithPath: "Resources/Commander.icns"),
             ].compactMap { $0 }
             for url in candidates {
                 if FileManager.default.fileExists(atPath: url.path),
@@ -156,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             &carbonEventHandler
         )
 
-        let signature = OSType(0x434D4452) // CMDR
+        let signature = OSType(0x4C544C4B) // LTLK
 
         let stopID = EventHotKeyID(signature: signature, id: 1)
         RegisterEventHotKey(47, UInt32(cmdKey), stopID, GetApplicationEventTarget(), 0, &carbonStopHotKeyRef) // Cmd+.

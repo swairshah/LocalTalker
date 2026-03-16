@@ -22,7 +22,7 @@ let package = Package(
         .executableTarget(
             name: "LocalTalker",
             dependencies: ["COnnxRuntime"],
-            path: "Sources/Commander",
+            path: "Sources/LocalTalker",
             resources: [
                 .copy("Resources"),
             ],

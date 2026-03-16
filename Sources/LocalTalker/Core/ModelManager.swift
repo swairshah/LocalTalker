@@ -71,7 +71,7 @@ final class ModelManager: ObservableObject {
 
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             throw NSError(
-                domain: "Commander.ModelManager",
+                domain: "LocalTalker.ModelManager",
                 code: http.statusCode,
                 userInfo: [NSLocalizedDescriptionKey: "Download failed (HTTP \(http.statusCode))"]
             )

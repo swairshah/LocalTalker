@@ -52,6 +52,8 @@ struct MainWindowView: View {
         }
     }
 
+    @State private var showModelPicker = false
+
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("LocalTalker")
@@ -81,6 +83,13 @@ struct MainWindowView: View {
 
             Spacer()
 
+            // ── Model selector ──────────────────────────────
+            modelSelector
+
+            // ── Resource monitor ────────────────────────────
+            ResourceWidget(monitor: conversationLoop.resourceMonitor)
+
+            // ── Status & shortcuts ──────────────────────────
             VStack(alignment: .leading, spacing: 8) {
                 statusPill
 
@@ -97,6 +106,95 @@ struct MainWindowView: View {
         .frame(width: 180)
         .padding(14)
         .foregroundStyle(.white)
+    }
+
+    private var modelSelector: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Dropdown header — click to toggle
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showModelPicker.toggle() }
+                if showModelPicker { conversationLoop.refreshModels() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                    Text(conversationLoop.selectedModelName)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Image(systemName: showModelPicker ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.3))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.08))
+                )
+            }
+            .buttonStyle(.plain)
+
+            // Expanded model list
+            if showModelPicker {
+                VStack(alignment: .leading, spacing: 2) {
+                    if conversationLoop.availableModels.isEmpty {
+                        Text("No .gguf models")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 1) {
+                                ForEach(conversationLoop.availableModels) { model in
+                                    let selected = model.path == conversationLoop.selectedModelPath
+                                    Button {
+                                        conversationLoop.switchModel(to: model.path)
+                                        withAnimation(.easeInOut(duration: 0.15)) { showModelPicker = false }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Circle()
+                                                .fill(selected ? Palette.accent : Color.white.opacity(0.15))
+                                                .frame(width: 6, height: 6)
+                                            Text(model.name)
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(selected ? .white : Color.white.opacity(0.65))
+                                                .lineLimit(1)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                .fill(selected ? Color.white.opacity(0.06) : Color.clear)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                }
+                .padding(4)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.06))
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
     }
 
     private var statusPill: some View {
@@ -129,12 +227,7 @@ struct MainWindowView: View {
     private var detail: some View {
         switch selectedTab {
         case .talk:
-            HStack(spacing: 0) {
-                TalkView(conversationLoop: conversationLoop)
-                Divider().overlay(Palette.divider)
-                ModelPanelView(conversationLoop: conversationLoop)
-                    .frame(width: 290)
-            }
+            TalkView(conversationLoop: conversationLoop)
         case .settings:
             SettingsView(conversationLoop: conversationLoop)
         }
@@ -218,97 +311,7 @@ private struct TalkView: View {
     }
 }
 
-private struct ModelPanelView: View {
-    @ObservedObject var conversationLoop: ConversationLoop
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Model")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-
-            GlassCard {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("llama.cpp")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                        Spacer()
-                        Button("Refresh") {
-                            conversationLoop.refreshModels()
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption)
-                        .foregroundStyle(Palette.accent)
-                    }
-
-                    if conversationLoop.availableModels.isEmpty {
-                        Text("No .gguf models found")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Text("Drop models in ~/Library/Application Support/LocalTalker/Models/llama")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    } else {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(conversationLoop.availableModels) { model in
-                                    let selected = model.path == conversationLoop.selectedModelPath
-
-                                    Button {
-                                        conversationLoop.switchModel(to: model.path)
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                                                .font(.caption)
-                                                .foregroundStyle(selected ? Palette.accent : Color.white.opacity(0.35))
-
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(model.name)
-                                                    .font(.caption.weight(.semibold))
-                                                    .foregroundStyle(.white)
-                                                    .lineLimit(1)
-
-                                                Text(URL(fileURLWithPath: model.path).lastPathComponent)
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                                    .lineLimit(1)
-                                            }
-                                            Spacer()
-                                        }
-                                        .padding(8)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(selected ? Color.white.opacity(0.08) : Color.clear)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 280)
-                    }
-                }
-            }
-
-            GlassCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Active")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                    Text(conversationLoop.selectedModelName)
-                        .font(.caption)
-                        .foregroundStyle(Color.white.opacity(0.8))
-                }
-            }
-
-            Spacer()
-        }
-        .padding(20)
-    }
-}
 
 private struct SettingsView: View {
     @ObservedObject var conversationLoop: ConversationLoop
@@ -609,6 +612,82 @@ private struct ChatRow: View {
                 .replacingOccurrences(of: #"<status>[^<]*</status>"#, with: "", options: .regularExpression)
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Resource Monitor Widget
+
+private struct ResourceWidget: View {
+    @ObservedObject var monitor: ResourceMonitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            // CPU bar
+            resourceRow(
+                icon: "cpu",
+                label: String(format: "%.0f%%", monitor.stats.processCPU),
+                fraction: min(monitor.stats.processCPU / 100.0, 1.0),
+                tint: cpuTint
+            )
+
+            // Memory bar (process)
+            resourceRow(
+                icon: "memorychip",
+                label: String(format: "%.0f MB", monitor.stats.processMemoryMB),
+                fraction: monitor.stats.systemMemoryTotalGB > 0
+                    ? monitor.stats.processMemoryMB / (monitor.stats.systemMemoryTotalGB * 1024)
+                    : 0,
+                tint: Color.white.opacity(0.35)
+            )
+
+            // System memory text
+            HStack(spacing: 4) {
+                Text(String(format: "sys %.1f / %.0f GB",
+                            monitor.stats.systemMemoryUsedGB,
+                            monitor.stats.systemMemoryTotalGB))
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.white.opacity(0.25))
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.05))
+        )
+    }
+
+    private func resourceRow(icon: String, label: String, fraction: Double, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+                .foregroundStyle(Color.white.opacity(0.35))
+                .frame(width: 12)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.white.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(tint)
+                        .frame(width: max(0, geo.size.width * min(fraction, 1.0)))
+                }
+            }
+            .frame(height: 4)
+
+            Text(label)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.4))
+                .frame(width: 42, alignment: .trailing)
+        }
+        .frame(height: 12)
+    }
+
+    private var cpuTint: Color {
+        let cpu = monitor.stats.processCPU
+        if cpu > 80 { return Color(red: 0.85, green: 0.45, blue: 0.40) }  // red-ish
+        if cpu > 40 { return Color(red: 0.82, green: 0.68, blue: 0.42) }  // warm
+        return Color.white.opacity(0.35)                                     // muted
     }
 }
 

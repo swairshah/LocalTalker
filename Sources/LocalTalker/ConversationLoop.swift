@@ -39,6 +39,9 @@ final class ConversationLoop: ObservableObject {
         }
     }
 
+    /// When false, responses are text-only (no TTS playback). Mic stays on.
+    @Published var ttsEnabled = true
+
     let transcript = TranscriptStore()
     let llmClient = LlamaCPPClient()
     let resourceMonitor = ResourceMonitor()
@@ -322,7 +325,7 @@ final class ConversationLoop: ObservableObject {
                 let speakText = speechTextForAssistantMessage(raw)
                 print("🔴 [TURN \(currentTurn)] agentEnd — raw=\(raw.prefix(200))")
                 print("🔴 [TURN \(currentTurn)] speakText=\(speakText.prefix(200))")
-                if !speakText.isEmpty {
+                if !speakText.isEmpty && ttsEnabled {
                     enqueueSpeech(speakText)
                 }
             } else {

@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var carbonStopHotKeyRef: EventHotKeyRef?
     private var carbonMuteHotKeyRef: EventHotKeyRef?
     private var carbonNewSessionHotKeyRef: EventHotKeyRef?
+    private var carbonTTSHotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -67,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let ref = carbonStopHotKeyRef { UnregisterEventHotKey(ref) }
         if let ref = carbonMuteHotKeyRef { UnregisterEventHotKey(ref) }
         if let ref = carbonNewSessionHotKeyRef { UnregisterEventHotKey(ref) }
+        if let ref = carbonTTSHotKeyRef { UnregisterEventHotKey(ref) }
         if let handler = carbonEventHandler { RemoveEventHandler(handler) }
     }
 
@@ -133,6 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     appDelegate.conversationLoop?.isMuted.toggle()
                 case 3:
                     appDelegate.conversationLoop?.startNewSession()
+                case 4:
+                    appDelegate.conversationLoop?.ttsEnabled.toggle()
                 default:
                     break
                 }
@@ -161,5 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let sessionID = EventHotKeyID(signature: signature, id: 3)
         RegisterEventHotKey(45, UInt32(cmdKey | shiftKey), sessionID, GetApplicationEventTarget(), 0, &carbonNewSessionHotKeyRef) // Cmd+Shift+N
+
+        let ttsID = EventHotKeyID(signature: signature, id: 4)
+        RegisterEventHotKey(43, UInt32(cmdKey), ttsID, GetApplicationEventTarget(), 0, &carbonTTSHotKeyRef) // Cmd+,
     }
 }

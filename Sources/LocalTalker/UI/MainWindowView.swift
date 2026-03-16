@@ -101,7 +101,10 @@ struct MainWindowView: View {
                     kbd("⌘/", "Mic")
                     kbd("⌘.", "Stop")
                 }
-                kbd("⌘⇧N", "New session")
+                HStack(spacing: 8) {
+                    kbd("⌘,", conversationLoop.ttsEnabled ? "TTS on" : "TTS off")
+                    kbd("⌘⇧N", "New")
+                }
             }
             .padding(14)
             .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))

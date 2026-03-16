@@ -22,7 +22,7 @@ The assistant backend is changed from Pi RPC to a local `llama.cpp` server (`lla
 
 Put `.gguf` files in:
 
-`~/Library/Application Support/LocalTalker/Models/llama`
+`~/.LocalTalker/Models/llama`
 
 (You can also keep models in `~/Models` or `~/Downloads`; LocalTalker scans those too.)
 

@@ -22,9 +22,10 @@ enum Constants {
     static let ttsHost = "127.0.0.1"
     static let ttsPort = 18080
 
+    /// Primary data directory: ~/.LocalTalker
     static let appSupportDir: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("LocalTalker")
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".LocalTalker")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()

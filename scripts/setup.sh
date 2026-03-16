@@ -11,7 +11,7 @@ ARCH="$(uname -m)"  # arm64 or x86_64
 
 VENDOR_DIR="vendor/onnxruntime"
 MODELS_DIR="Resources/models"
-LLAMA_MODELS_DIR="$HOME/Library/Application Support/LocalTalker/Models/llama"
+LLAMA_MODELS_DIR="$HOME/.LocalTalker/Models/llama"
 
 # ── ONNX Runtime ─────────────────────────────────────────────
 if [ -f "$VENDOR_DIR/lib/libonnxruntime.dylib" ]; then

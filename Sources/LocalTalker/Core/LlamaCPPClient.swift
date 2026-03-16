@@ -35,7 +35,7 @@ final class LlamaCPPClient {
             case .binaryNotFound:
                 return "llama-server binary not found"
             case .noModelsFound:
-                return "No GGUF models found. Add models to ~/Library/Application Support/LocalTalker/Models/llama"
+                return "No GGUF models found. Add models to ~/.LocalTalker/Models/llama"
             case .modelNotFound(let path):
                 return "Model not found: \(path)"
             case .serverStartFailed:
@@ -85,6 +85,12 @@ final class LlamaCPPClient {
     var toolsEnabled = true
 
     private var systemPrompt: String = ""
+
+    /// Update the system prompt without restarting the server.
+    func updateSystemPrompt(_ prompt: String) {
+        systemPrompt = prompt
+    }
+
     private var history: [ChatMessage] = []
     private var generationTask: Task<Void, Never>?
     private var streamGeneration: Int = 0
